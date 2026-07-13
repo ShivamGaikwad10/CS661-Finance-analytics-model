@@ -13,16 +13,18 @@ Pipeline:
         -> get_clustered_matrix()
 """
 
-import os
+
 
 import numpy as np
 import pandas as pd
+from utils.database import run_query
 from sklearn.cluster import AgglomerativeClustering
 from scipy.cluster.hierarchy import linkage, dendrogram as scipy_dendrogram
 from scipy.spatial.distance import squareform
 
 
-CLEAN_DATA_PATH = "data/processed/clean_stock_data.csv"
+
+
 
 # Minimum number of overlapping trading days required for a correlation
 # pair to be considered reliable (stocks have different listing dates).
@@ -32,34 +34,46 @@ MIN_OVERLAP_PERIODS = 60
 # ---------------------------------------------------------------------------
 # Step 1: Load Data
 # ---------------------------------------------------------------------------
-def load_clean_data(path: str = CLEAN_DATA_PATH) -> pd.DataFrame:
+def load_clean_data(start_date=None, end_date=None, sector=None) -> pd.DataFrame:
     """
-    Reads the cleaned stock dataset produced by utils/preprocessing.py.
-
-    Expects (at minimum) columns: Company, Date, Close.
+    Loads the cleaned stock dataset from DuckDB, optionally restricted to a
+    date range and/or a single sector.
 
     Returns
     -------
     pd.DataFrame
-        Sorted by Company, Date with Date parsed as datetime.
+        Sorted by Company and Date.
     """
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Clean data not found at '{path}'. "
-            "Run `python utils/loader.py` then `python utils/preprocessing.py` first."
-        )
 
-    df = pd.read_csv(path, parse_dates=["Date"])
+    conditions = []
+    params = []
+    if start_date is not None:
+        conditions.append("Date >= CAST(? AS DATE)")
+        params.append(start_date)
+    if end_date is not None:
+        conditions.append("Date <= CAST(? AS DATE)")
+        params.append(end_date)
+    if sector is not None:
+        conditions.append("Sector = ?")
+        params.append(sector)
 
-    required_cols = {"Company", "Date", "Close"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"clean_stock_data.csv is missing required columns: {missing}")
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    df = df.sort_values(["Company", "Date"]).reset_index(drop=True)
+    query = f"""
+        SELECT
+            Company,
+            Date,
+            Close
+        FROM clean_stock_data
+        {where_clause}
+        ORDER BY Company, Date
+    """
+
+    df = run_query(query, tuple(params) if params else None)
+
+    df["Date"] = pd.to_datetime(df["Date"])
 
     return df
-
 
 # ---------------------------------------------------------------------------
 # Step 2: Daily Returns
@@ -242,9 +256,11 @@ def get_clustered_matrix(
 # Convenience: run the full pipeline in one call
 # ---------------------------------------------------------------------------
 def run_correlation_pipeline(
-    path: str = CLEAN_DATA_PATH,
     n_clusters: int = 5,
     linkage_method: str = "average",
+    start_date=None,
+    end_date=None,
+    sector=None,
 ):
     """
     Runs steps 1-6 end to end. Used by pages/correlation.py.
@@ -258,10 +274,19 @@ def run_correlation_pipeline(
         'cluster_result'    : output of perform_agglomerative_clustering()
         'clustered_matrix'  : correlation matrix reordered by dendrogram leaves
     """
-    df = load_clean_data(path)
+    df = load_clean_data(start_date=start_date, end_date=end_date, sector=sector)
     df = compute_daily_returns(df)
     pivot = create_pivot_table(df)
     corr_matrix = compute_correlation_matrix(pivot)
+
+    if len(corr_matrix.columns) < 2:
+        raise ValueError(
+            "Fewer than 2 companies in the selected Date/Sector filter -- "
+            "correlation and clustering need at least 2 companies to compare."
+        )
+
+    # A sector filter can leave fewer companies than the requested cluster count.
+    n_clusters = max(1, min(n_clusters, len(corr_matrix.columns) - 1))
     cluster_result = perform_agglomerative_clustering(
         corr_matrix, n_clusters=n_clusters, linkage_method=linkage_method
     )

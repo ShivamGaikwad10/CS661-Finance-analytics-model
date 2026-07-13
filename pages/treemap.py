@@ -102,6 +102,31 @@ def create_sector_bar_figure(sector_name: str, company_growth: pd.DataFrame) -> 
     return fig
 
 
+def create_all_sector_comparison_figure(company_growth: pd.DataFrame) -> go.Figure:
+    sector_growth = (
+        company_growth.groupby("Sector", as_index=False)
+        .agg(CAGR=("CAGR", "mean"), Num_Companies=("Company", "nunique"))
+        .sort_values("CAGR")
+    )
+
+    fig = go.Figure(go.Bar(
+        x=sector_growth["CAGR"],
+        y=sector_growth["Sector"],
+        orientation="h",
+        marker=dict(color=sector_growth["CAGR"], colorscale=GROWTH_COLORSCALE),
+        text=[f"{v:+.0%}" for v in sector_growth["CAGR"]],
+        textposition="outside",
+        customdata=sector_growth[["Num_Companies"]],
+        hovertemplate="%{y} · %{x:+.1%}<br>%{customdata[0]} companies<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis_tickformat=".0%",
+        margin=dict(l=110, r=30, t=10, b=20),
+        autosize=True,
+    )
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # create_company_price_figure()
 # ---------------------------------------------------------------------------
@@ -250,8 +275,8 @@ layout = dbc.Container(
                             create_growth_figure(PIPELINE["hierarchy"], "treemap", "Total_Volume"),
                         ),
                         _pane(
-                            "pane-detail", f"{default_sector} companies", "growth-detail-graph",
-                            create_sector_bar_figure(default_sector, PIPELINE["company_growth"]),
+                            "pane-detail", "All sector comparison", "growth-detail-graph",
+                            create_all_sector_comparison_figure(PIPELINE["company_growth"]),
                         ),
                     ],
                     className="growth-split",
@@ -278,12 +303,22 @@ def register_callbacks():
         Input("chart-type-toggle", "value"),
         Input("size-metric-toggle", "value"),
         Input("year-range-slider", "value"),
+        Input("sector-filter", "value"),
+        Input("company-filter", "value"),
     )
-    def update_growth_chart(chart_type, size_metric, year_range):
+    def update_growth_chart(chart_type, size_metric, year_range, sector, company):
+        # Sector/Company come from the sidebar; the Date filter is skipped
+        # here since this page already has its own year-range control above.
         start_year, end_year = year_range
-        result = run_treemap_pipeline(
-            start_date=f"{start_year}-01-01", end_date=f"{end_year}-12-31", size_metric=size_metric,
-        )
+        try:
+            result = run_treemap_pipeline(
+                start_date=f"{start_year}-01-01", end_date=f"{end_year}-12-31", size_metric=size_metric,
+                sector=sector, company=company,
+            )
+        except ValueError:
+            # Too few trading days for this Sector/Company + year-range combo
+            # to compute a reliable CAGR -- keep showing the last valid chart.
+            return dash.no_update, dash.no_update, dash.no_update, dash.no_update
         fig = create_growth_figure(result["hierarchy"], chart_type, size_metric)
         kpi_strip = build_kpi_strip(result["company_growth"], result["sector_growth"])
         return fig, serialize_company_growth(result["company_growth"]), kpi_strip, f"{start_year}–{end_year}"
@@ -297,14 +332,14 @@ def register_callbacks():
         prevent_initial_call=True,
     )
     def update_detail_panel(click_data, stored_data, year_range):
+        company_growth = pd.DataFrame(stored_data)
+
         if not click_data:
-            return dash.no_update, dash.no_update
+            return create_all_sector_comparison_figure(company_growth), "All sector comparison"
 
         node_id = click_data["points"][0].get("id", "")
         if node_id in ("", ROOT_ID):
-            return dash.no_update, dash.no_update
-
-        company_growth = pd.DataFrame(stored_data)
+            return create_all_sector_comparison_figure(company_growth), "All sector comparison"
 
         if "/" in node_id:
             _, company_name = node_id.split("/", 1)
