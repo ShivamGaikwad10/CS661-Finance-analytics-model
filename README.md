@@ -131,7 +131,7 @@ Based on the current code and recent commits, the project includes these impleme
 ### 1. Clone
 
 ```bash
-git clone https://github.com/sayanip23/CS661_PROJECT.git
+git clone https://github.com/ShivamGaikwad10/CS661-Finance-analytics-model.git
 cd CS661_PROJECT
 ```
 
